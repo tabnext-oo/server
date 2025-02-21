@@ -90,7 +90,7 @@ if (cluster.isMaster) {
 
   updateLicense();
 
-  fs.watchFile(cfgLicenseFile, updateLicense);
+
   setInterval(updateLicense, 86400000);
 } else {
   const converter = require('./converter');
