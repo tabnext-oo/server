@@ -147,7 +147,6 @@ if (!(cfgTokenEnableBrowser && cfgTokenEnableRequestInbox && cfgTokenEnableReque
 }
 
 updateLicense();
-fs.watchFile(cfgLicenseFile, updateLicense);
 setInterval(updateLicense, 86400000);
 
 try {
