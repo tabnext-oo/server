@@ -57,6 +57,7 @@ const formatChecker = require('./../../Common/sources/formatchecker');
 const statsDClient = require('./../../Common/sources/statsdclient');
 const operationContext = require('./../../Common/sources/operationContext');
 const tenantManager = require('./../../Common/sources/tenantManager');
+const inlinePrintTiming = require('./../../Common/sources/inlinePrintTiming');
 const config = require('config');
 
 const cfgTypesUpload = config.get('services.CoAuthoring.utils.limits_image_types_upload');
@@ -661,9 +662,24 @@ function* commandReopen(ctx, conn, cmd, outputData) {
 function* commandSave(ctx, cmd, outputData) {
   const format = cmd.getFormat() || 'bin';
   const completeParts = yield* saveParts(ctx, cmd, 'Editor.' + format);
+  if (cmd.getInline() && cmd.getSaveKey()) {
+    inlinePrintTiming.bindTask(cmd.getDocId(), cmd.getSaveKey());
+    ctx.logger.warn(
+      'printTiming stored ms=%s savekey=%s',
+      inlinePrintTiming.elapsedMs(cmd.getDocId(), cmd.getSaveKey()),
+      cmd.getSaveKey()
+    );
+  }
   if (completeParts) {
     const queueData = getSaveTask(ctx, cmd);
     yield* docsCoServer.addTask(queueData, constants.QUEUE_PRIORITY_LOW);
+    if (cmd.getInline()) {
+      ctx.logger.warn(
+        'printTiming queued ms=%s savekey=%s',
+        inlinePrintTiming.elapsedMs(cmd.getDocId(), cmd.getSaveKey()),
+        cmd.getSaveKey()
+      );
+    }
   }
   outputData.setStatus('ok');
   outputData.setData(cmd.getSaveKey());
@@ -1541,10 +1557,15 @@ exports.downloadAs = function (req, res) {
       const strCmd = req.query['cmd'];
       const cmd = new commonDefines.InputCommand(JSON.parse(strCmd));
       docId = cmd.getDocId();
+      const inlineTimingDocIdAtStart = docId;
       let userId = cmd.getUserId();
       ctx.setDocId(docId);
       ctx.setUserId(userId);
       ctx.logger.debug('Start downloadAs: %s', strCmd);
+      if (cmd.getInline()) {
+        inlinePrintTiming.begin(inlineTimingDocIdAtStart);
+        ctx.logger.warn('printTiming downloadAs received docId=%s', docId);
+      }
       const tenTokenEnableBrowser = ctx.getCfg('services.CoAuthoring.token.enable.browser', cfgTokenEnableBrowser);
 
       if (tenTokenEnableBrowser || cmd.getTokenDownload() || cmd.getTokenSession()) {
@@ -1582,9 +1603,18 @@ exports.downloadAs = function (req, res) {
           return;
         }
       }
+      if (cmd.getInline()) {
+        if (docId !== inlineTimingDocIdAtStart) {
+          inlinePrintTiming.migrate(inlineTimingDocIdAtStart, docId);
+        }
+        ctx.logger.warn('printTiming jwt ms=%s docId=%s', inlinePrintTiming.elapsedMs(docId), docId);
+      }
       ctx.setDocId(docId);
       ctx.setUserId(userId);
       const selectRes = yield taskResult.select(ctx, docId);
+      if (cmd.getInline()) {
+        ctx.logger.warn('printTiming select ms=%s docId=%s', inlinePrintTiming.elapsedMs(docId), docId);
+      }
       const row = selectRes.length > 0 ? selectRes[0] : null;
       if (!cmd.getWithoutPassword()) {
         addPasswordToCmd(ctx, cmd, row && row.password, row && row.change_id);
@@ -2092,6 +2122,10 @@ exports.receiveTask = function (data, ack) {
             //nothing
           }
           if (outputData.getStatus()) {
+            if (cmd.getInline()) {
+              ctx.logger.warn('printTiming urlReady savekey=%s', cmd.getSaveKey());
+              inlinePrintTiming.end(cmd.getDocId(), cmd.getSaveKey());
+            }
             ctx.logger.debug('receiveTask publish: %s', JSON.stringify(outputData));
             const output = new OutputDataWrap('documentOpen', outputData);
             yield docsCoServer.publish(ctx, {

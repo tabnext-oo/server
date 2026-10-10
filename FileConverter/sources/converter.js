@@ -47,6 +47,7 @@ const ms = require('ms');
 const {pipeline} = require('node:stream/promises');
 
 const commonDefines = require('./../../Common/sources/commondefines');
+const inlinePrintTiming = require('./../../Common/sources/inlinePrintTiming');
 const storage = require('./../../Common/sources/storage/storage-base');
 const utils = require('./../../Common/sources/utils');
 const constants = require('./../../Common/sources/constants');
@@ -1195,6 +1196,13 @@ function* ExecuteTask(ctx, task) {
   const getTaskTime = new Date();
   const cmd = task.getCmd();
   const dataConvert = new TaskQueueDataConvert(ctx, task);
+  const printStartedAt = cmd.getInline() ? Date.now() : 0;
+  if (cmd.getInline()) {
+    const taskStartMs = inlinePrintTiming.elapsedMs(cmd.getDocId(), cmd.getSaveKey());
+    if (taskStartMs !== null) {
+      ctx.logger.warn('printTiming taskStart ms=%s savekey=%s', taskStartMs, cmd.getSaveKey());
+    }
+  }
   ctx.logger.info('Start Task');
   let error = constants.NO_ERROR;
   const tempDirs = getTempDir();
@@ -1236,13 +1244,26 @@ function* ExecuteTask(ctx, task) {
       error = constants.CONVERT_PARAMS;
     }
   } else if (cmd.getSaveKey() || task.getFromOrigin() || task.getFromSettings()) {
-    yield* downloadFileFromStorage(ctx, cmd.getDocId(), tempDirs.source);
+    const storageStartedAt = Date.now();
+    const storageCount = yield* downloadFileFromStorage(ctx, cmd.getDocId(), tempDirs.source);
+    if (cmd.getInline()) {
+      ctx.logger.warn(
+        'printTiming storageCopy ms=%d files=%d savekey=%s',
+        Date.now() - storageStartedAt,
+        storageCount,
+        cmd.getSaveKey()
+      );
+    }
     ctx.logger.debug('downloadFileFromStorage complete');
     if (clientStatsD) {
       clientStatsD.timing('conv.downloadFileFromStorage', new Date() - curDate);
       curDate = new Date();
     }
+    const saveKeyStartedAt = Date.now();
     error = yield* processDownloadFromStorage(ctx, dataConvert, cmd, task, tempDirs, authorProps);
+    if (cmd.getInline()) {
+      ctx.logger.warn('printTiming saveKeyCopy ms=%d savekey=%s', Date.now() - saveKeyStartedAt, cmd.getSaveKey());
+    }
   } else if (cmd.getForgotten()) {
     yield* downloadFileFromStorage(ctx, cmd.getForgotten(), tempDirs.source, tenForgottenFiles);
     ctx.logger.debug('downloadFileFromStorage complete');
@@ -1268,6 +1289,7 @@ function* ExecuteTask(ctx, task) {
   }
   let childRes = null;
   let isTimeout = false;
+  const spawnStartedAt = cmd.getInline() ? Date.now() : 0;
   if (constants.NO_ERROR === error) {
     ({childRes, isTimeout} = yield* spawnProcess(ctx, builderParams, tempDirs, dataConvert, authorProps, getTaskTime, task, isInJwtToken));
     const canRollback =
@@ -1290,6 +1312,15 @@ function* ExecuteTask(ctx, task) {
       dataConvert.fileTo = dataConvert.fileTo.slice(0, -extOld.length) + extNew;
       ({childRes, isTimeout} = yield* spawnProcess(ctx, builderParams, tempDirs, dataConvert, authorProps, getTaskTime, task, isInJwtToken));
     }
+    if (cmd.getInline()) {
+      ctx.logger.warn(
+        'printTiming x2t ms=%d timeout=%s status=%s savekey=%s',
+        Date.now() - spawnStartedAt,
+        isTimeout,
+        childRes && childRes.status,
+        cmd.getSaveKey()
+      );
+    }
     if (clientStatsD) {
       clientStatsD.timing('conv.spawnSync', new Date() - curDate);
       curDate = new Date();
@@ -1311,6 +1342,9 @@ function* ExecuteTask(ctx, task) {
   }
   if (clientStatsD) {
     clientStatsD.timing('conv.allconvert', new Date() - startDate);
+  }
+  if (printStartedAt) {
+    ctx.logger.warn('printTiming taskTotal ms=%d savekey=%s', Date.now() - printStartedAt, cmd.getSaveKey());
   }
   ctx.logger.info('End Task');
   return resData;
